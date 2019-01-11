@@ -8,6 +8,7 @@
 #include <linux/kdev_t.h>
 #include <linux/cdev.h>
 #include <linux/uaccess.h>
+#include <linux/ioctl.h>
 
 MODULE_AUTHOR("sclolus");
 MODULE_ALIAS("keyboard_driver");
@@ -17,6 +18,7 @@ MODULE_LICENSE("GPL v2");
 #define LOG MODULE_NAME ": "
 #define DEVICE_NBR_COUNT 2
 
+static DECLARE_WAIT_QUEUE_HEAD(keyboard_driver_queue);
 static unsigned int	major = 42;
 static unsigned int	minor = 0;
 static dev_t		dev;
@@ -41,6 +43,7 @@ static int  driver_open(struct inode *inode, struct file *file)
 
 	cdev = inode->i_cdev;
 	file->private_data = cdev;
+	nonseekable_open(inode, file);
 	printk(KERN_INFO LOG "%s has opened the device\n", current->comm);
 	return 0;
 }
@@ -50,14 +53,19 @@ static int  driver_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static uint64_t    reader_count = 0;
 
 static ssize_t	driver_read(struct file *file, char __user *to, size_t size, loff_t *off)
 {
 	ssize_t	    ret;
 	uint64_t    len;
 
+//	reader_count++;
+	if (wait_event_interruptible(keyboard_driver_queue, reader_count == 2))
+		return -ERESTARTSYS;
 	if (*off >= sizeof(MODULE_NAME))
 		return (0);
+	printk(KERN_INFO "driver_read function has woken up, process->pid: %d\n", current->pid);
 	len = min(size, sizeof(MODULE_NAME));
 	ret = (ssize_t)copy_to_user(to, MODULE_NAME, len);
 	if (ret != 0) {
@@ -67,14 +75,24 @@ static ssize_t	driver_read(struct file *file, char __user *to, size_t size, loff
 	ret = (ssize_t)len;
 	*off += len;
 out:
+	reader_count--;
 	return ret;
+}
+
+static ssize_t driver_write(struct file *file, const char __user *_from, size_t size, loff_t *off)
+{
+	reader_count = 2;
+	wake_up_interruptible(&keyboard_driver_queue);
+	return 0;
 }
 
 static struct file_operations	device_fops = {
 	.owner = THIS_MODULE,
 	.open = &driver_open,
 	.release = &driver_release,
-	.read = driver_read,
+	.read = &driver_read,
+	.write = &driver_write,
+	.llseek = &no_llseek,
 };
 
 static int __init   init(void)
