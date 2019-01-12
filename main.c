@@ -165,6 +165,7 @@ static int __init   init(void)
 		ret = chrdev_result;
 		goto out;
 	}
+
 	cdev_init(&device, &device_fops);
 	device.owner = THIS_MODULE;
 	ret = cdev_add(&device, dev, 1);
