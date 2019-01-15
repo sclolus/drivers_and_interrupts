@@ -449,17 +449,11 @@ out:
 	return ret;
 }
 
-static ssize_t driver_write(struct file *file, const char __user *_from, size_t size, loff_t *off)
-{
-	return 0;
-}
-
 static struct file_operations	device_fops = {
 	.owner = THIS_MODULE,
 	.open = &driver_open,
 	.release = &driver_release,
 	.read = &driver_read,
-	.write = &driver_write,
 	.llseek = &no_llseek,
 };
 
