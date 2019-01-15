@@ -343,10 +343,11 @@ static struct scan_key_code *find_scan_key_code(struct scan_key_code *set, uint6
 
 static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 {
-	uint8_t	    		code;
+	uint32_t    		code;
 	struct scan_key_code	*key_id;
 
 	atomic_set(&pending_data, 1);
+	mb();
 	code = inb(KEYBOARD_IOPORT); //read a longword worth ?
 
 	key_id = find_scan_key_code(scan_code_set_1,
@@ -356,7 +357,19 @@ static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 	if (key_id == NULL) {
 		printk(KERN_INFO LOG "Could not find scan key code structure for code %#02llx\n", (uint64_t)code);
 	} else {
-		printk(KERN_INFO LOG "%s(%#02llx) %s", key_id->key_name, (uint64_t)code, key_state_to_string(key_id->state));
+		struct timeval	now;
+		long long	hours;
+		long long	minutes;
+		long long	seconds;
+
+		do_gettimeofday(&now);
+		hours = (now.tv_sec / 3600) % 24;
+		now.tv_sec %= 3600;
+		minutes = now.tv_sec / 60;
+		now.tv_sec %= 60;
+		seconds = now.tv_sec;
+
+		printk(KERN_INFO LOG "%02lld:%02lld:%02lld %s(%#02llx) %s", hours, minutes, seconds, key_id->key_name, (uint64_t)code, key_state_to_string(key_id->state));
 	}
 	/* wake_up_interruptible(&read_wqueue); */
 	return IRQ_NONE;
