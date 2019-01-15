@@ -343,8 +343,10 @@ static struct scan_key_code *find_scan_key_code(struct scan_key_code *set, uint6
 
 static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 {
-	uint32_t    		code;
+	uint64_t    		code;
 	struct scan_key_code	*key_id;
+	static bool		code_pending = false;
+	static uint64_t		buffer_code = 0;
 
 	atomic_set(&pending_data, 1);
 	mb();
@@ -354,8 +356,15 @@ static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 				sizeof(scan_code_set_1) / sizeof(*scan_code_set_1),
 				(uint64_t)code);
 
+	if (code_pending) {
+		code |= buffer_code << 8;
+	}
+
 	if (key_id == NULL) {
 		printk(KERN_INFO LOG "Could not find scan key code structure for code %#02llx\n", (uint64_t)code);
+		code_pending = true;
+		buffer_code <<= 8;
+		buffer_code |= code;
 	} else {
 		struct timeval	now;
 		long long	hours;
@@ -370,6 +379,8 @@ static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 		seconds = now.tv_sec;
 
 		printk(KERN_INFO LOG "%02lld:%02lld:%02lld %s(%#02llx) %s", hours, minutes, seconds, key_id->key_name, (uint64_t)code, key_state_to_string(key_id->state));
+		code_pending = false;
+		buffer_code = 0;
 	}
 	/* wake_up_interruptible(&read_wqueue); */
 	return IRQ_NONE;
