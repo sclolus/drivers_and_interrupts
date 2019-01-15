@@ -17,6 +17,8 @@ MODULE_AUTHOR("sclolus");
 MODULE_ALIAS("keyboard_driver");
 MODULE_LICENSE("GPL v2");
 
+#define PURE __attribute__((pure))
+
 #define MODULE_NAME "keyboard_driver"
 #define LOG MODULE_NAME ": "
 #define DEVICE_NBR_COUNT 2
@@ -256,7 +258,7 @@ struct scan_key_code	scan_code_set_1[] = {
 	{ 0xe053, "delete", PRESSED },
 	{ 0xe05b, "left GUI", PRESSED },
 	{ 0xe05c, "right GUI", PRESSED },
-	{ 0xe05d, ""apps"", PRESSED },
+	{ 0xe05d, "\"apps\"", PRESSED },
 	{ 0xe05e, "(ACPI) power", PRESSED },
 	{ 0xe05f, "(ACPI) sleep", PRESSED },
 	{ 0xe063, "(ACPI) wake", PRESSED },
@@ -294,7 +296,7 @@ struct scan_key_code	scan_code_set_1[] = {
 	{ 0xe0d3, "delete", RELEASED },
 	{ 0xe0db, "left GUI", RELEASED },
 	{ 0xe0dc, "right GUI", RELEASED },
-	{ 0xe0dd, ""apps"", RELEASED },
+	{ 0xe0dd, "\"apps\"", RELEASED },
 	{ 0xe0de, "(ACPI) power", RELEASED },
 	{ 0xe0df, "(ACPI) sleep", RELEASED },
 	{ 0xe0e3, "(ACPI) wake", RELEASED },
@@ -312,13 +314,50 @@ struct scan_key_code	scan_code_set_1[] = {
 	{ 0xe11d45e19dc5, "pause", PRESSED },
 };
 
+static PURE char	*key_state_to_string(enum key_state state) {
+	switch (state) {
+	case PRESSED:
+		return "Pressed";
+	case RELEASED:
+		return "Released";
+	default:
+		printk(KERN_WARNING LOG "Invalid state was passed to key_state_to_string");
+		return NULL;
+	}
+	return NULL;
+}
+
+static struct scan_key_code *find_scan_key_code(struct scan_key_code *set, uint64_t set_len, uint64_t code)
+{
+	uint64_t    i;
+
+	i = 0;
+	while (i < set_len) {
+		if (code == set[i].code)
+			return set + i;
+		i++;
+	}
+	return NULL;
+}
+
+
 static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 {
-	uint8_t	code;
+	uint8_t	    		code;
+	struct scan_key_code	*key_id;
 
 	atomic_set(&pending_data, 1);
-	code = inb(KEYBOARD_IOPORT);
-	printk(KERN_INFO LOG "Got code %x -> %c\n", code, code);
+	code = inb(KEYBOARD_IOPORT); //read a longword worth ?
+
+	key_id = find_scan_key_code(scan_code_set_1,
+				sizeof(scan_code_set_1) / sizeof(*scan_code_set_1),
+				(uint64_t)code);
+
+	if (key_id == NULL) {
+		printk(KERN_INFO LOG "Could not find scan key code structure for code %#02llx\n", (uint64_t)code);
+	} else {
+		printk(KERN_INFO LOG "%s(%#02llx) %s", key_id->key_name, (uint64_t)code, key_state_to_string(key_id->state));
+	}
 	/* wake_up_interruptible(&read_wqueue); */
 	return IRQ_NONE;
 }
