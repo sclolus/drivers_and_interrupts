@@ -10,7 +10,7 @@ module-obj = $(obj-m:.o=.ko)
 
 KERNELRELEASE=$(shell uname -r)
 KDIR=/lib/modules/$(shell uname -r)/build
-EXTRAFLAGS= -Wall  -Werror -v -g -DDEBUG
+EXTRAFLAGS= -Wall  -Werror -v -g -DDEBUG -O
 FLAGS= $(EXTRAFLAGS)
 ccflags-y= $(EXTRAFLAGS)
 
@@ -26,7 +26,7 @@ clean:
 	make -C $(KDIR) M=$(PWD) clean
 
 test: $(obj-test)
-	gcc $^ -o test
+	gcc $^ $(FLAGS) -o test
 	./test
 
 %.o: %.c
