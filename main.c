@@ -352,13 +352,14 @@ static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 	mb();
 	code = inb(KEYBOARD_IOPORT); //read a longword worth ?
 
+		if (code_pending) {
+		code |= buffer_code << 8;
+	}
+
+
 	key_id = find_scan_key_code(scan_code_set_1,
 				sizeof(scan_code_set_1) / sizeof(*scan_code_set_1),
 				(uint64_t)code);
-
-	if (code_pending) {
-		code |= buffer_code << 8;
-	}
 
 	if (key_id == NULL) {
 		printk(KERN_INFO LOG "Could not find scan key code structure for code %#02llx\n", (uint64_t)code);
