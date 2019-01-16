@@ -12,6 +12,7 @@
 #include <linux/delay.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
+#include <linux/miscdevice.h>
 
 MODULE_AUTHOR("sclolus");
 MODULE_ALIAS("keyboard_driver");
@@ -24,17 +25,13 @@ MODULE_LICENSE("GPL v2");
 #define DEVICE_NBR_COUNT 2
 #define KEYBOARD_IOPORT 0x60
 
-static unsigned int	major = 42;
 static unsigned int	minor = 0;
-static dev_t		dev;
-static struct cdev	device;
-static struct resource	*resource;
 static uint32_t		irq = 0;
-static bool		can_request_region = false;
+
 DEFINE_MUTEX(open_mutex);
 
-module_param(irq, uint, 0644);
-module_param(can_request_region, bool, 0644);
+module_param(irq, uint, 0444);
+module_param(minor, uint, 0444);
 
 static const struct usb_device_id usb_module_id_table[2] = {
 	{ USB_INTERFACE_INFO(
@@ -61,6 +58,17 @@ struct scan_key_code {
 	enum key_state	state;
 };
 
+struct	key_entry {
+	struct scan_key_code	key;
+	struct timeval		date;
+};
+
+struct	driver_data {
+	struct miscdevice   device;
+	struct key_entry    *entries;
+};
+
+static struct driver_data  driver_data;
 
 struct scan_key_code	scan_code_set_1[] = {
 	{ 0x1, "escape", PRESSED },
@@ -350,22 +358,21 @@ static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 
 	atomic_set(&pending_data, 1);
 	mb();
-	code = inb(KEYBOARD_IOPORT); //read a longword worth ?
+	code = inb(KEYBOARD_IOPORT);
 
-		if (code_pending) {
-		code |= buffer_code << 8;
+	if (code_pending) {
+		code |= buffer_code << 8UL;
 	}
-
 
 	key_id = find_scan_key_code(scan_code_set_1,
 				sizeof(scan_code_set_1) / sizeof(*scan_code_set_1),
 				(uint64_t)code);
 
 	if (key_id == NULL) {
-		printk(KERN_INFO LOG "Could not find scan key code structure for code %#02llx\n", (uint64_t)code);
 		code_pending = true;
-		buffer_code <<= 8;
+		buffer_code <<= 8UL;
 		buffer_code |= code;
+		printk(KERN_INFO LOG "Current buffered code: %#02llx\n", (uint64_t)buffer_code);
 	} else {
 		struct timeval	now;
 		long long	hours;
@@ -379,7 +386,7 @@ static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 		now.tv_sec %= 60;
 		seconds = now.tv_sec;
 
-		printk(KERN_INFO LOG "%02lld:%02lld:%02lld %s(%#02llx) %s", hours, minutes, seconds, key_id->key_name, (uint64_t)code, key_state_to_string(key_id->state));
+		printk(KERN_INFO LOG "%02lld:%02lld:%02lld %s(%#02llx) %s\n", hours, minutes, seconds, key_id->key_name, (uint64_t)code, key_state_to_string(key_id->state));
 		code_pending = false;
 		buffer_code = 0;
 	}
@@ -460,49 +467,34 @@ static struct file_operations	device_fops = {
 
 static int __init   init(void)
 {
-	int	ret;
-	int	chrdev_result;
+	int		    ret;
 
 	ret = 0;
 	if (irq != 0) {
 		printk(KERN_INFO LOG "User requested default irq to be %d\n", irq);
+	} else {
+		irq = 1; //add defines
 	}
 
-	if (major) {
-		dev = MKDEV(major, minor);
-		chrdev_result = register_chrdev_region(dev, DEVICE_NBR_COUNT, MODULE_NAME);
+	if (minor != 0) {
+		printk(KERN_INFO LOG "User request minor number for device to be %u\n", minor);
 	} else {
-		chrdev_result = alloc_chrdev_region(&dev, 0, DEVICE_NBR_COUNT, MODULE_NAME);
+		minor = 42; //add defines
 	}
-	if (0 != chrdev_result) {
-		printk(KERN_WARNING LOG "Failed to allocated device numbers at major: %d\n", major);
-		ret = chrdev_result;
+
+	driver_data.device.name = MODULE_NAME;
+	driver_data.device.fops = &device_fops;
+	driver_data.device.parent = NULL; //check this
+	driver_data.device.this_device = NULL; //check this
+	driver_data.device.nodename = MODULE_NAME;
+	driver_data.device.minor = minor;
+
+	ret = misc_register(&driver_data.device);
+
+	if (ret != 0) {
+		printk(KERN_WARNING LOG "Failed to register misc device\n");
 		goto out;
 	}
-
-	cdev_init(&device, &device_fops);
-	device.owner = THIS_MODULE;
-	ret = cdev_add(&device, dev, 1);
-	if (0 != ret) {
-		printk(KERN_WARNING LOG "Failed to add character device\n");
-		goto err_need_unregister_chrdev;
-	}
-
-	printk(KERN_INFO LOG "Registered dev: %d\n", dev);
-
-	if (can_request_region) {
-		if (NULL == (resource = request_region(KEYBOARD_IOPORT, 1, "keyboard_driver"))) {
-			printk(KERN_INFO LOG "Unable to register region starting at port: %d for keyboard\n", KEYBOARD_IOPORT);
-			ret = -EPERM;
-			goto err_need_del_cdev;
-		}
-		printk(KERN_INFO LOG "Got the resource for keyboard_driver at io/port %d\n", KEYBOARD_IOPORT);
-	}
-	goto out;
-err_need_del_cdev:
-	cdev_del(&device);
-err_need_unregister_chrdev:
-	unregister_chrdev_region(dev, DEVICE_NBR_COUNT);
 out:
 	return ret;
 }
@@ -511,7 +503,6 @@ module_init(init);
 static void __exit  cleanup(void)
 {
 	printk(KERN_INFO LOG "Cleanup up module\n");
-	cdev_del(&device);
-	unregister_chrdev_region(dev, DEVICE_NBR_COUNT);
+	misc_deregister(&driver_data.device);
 }
 module_exit(cleanup);
