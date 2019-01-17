@@ -49,6 +49,8 @@ static atomic_t	pending_data = ATOMIC_INIT(0);
 DECLARE_WAIT_QUEUE_HEAD(read_wqueue);
 
 static LIST_HEAD(key_entry_list);
+static DEFINE_SPINLOCK(key_list_spinlock);
+static DEFINE_SEMAPHORE(key_list_semaphore);
 
 enum	ps2_key_state {
 	PRESSED,
@@ -79,14 +81,15 @@ struct	driver_data {
 static struct driver_data  driver_data;
 
 static int	driver_release(struct inode *inode, struct file *file);
-static ssize_t	driver_read(struct file *file, char __user *to, size_t size, loff_t *off);
+/* static ssize_t	driver_read(struct file *file, char __user *to, size_t size, loff_t *off); */
 static int	driver_open(struct inode *inode, struct file *file);
 static const struct file_operations	device_fops = {
 	.owner = THIS_MODULE,
 	.open = &driver_open,
 	.release = &driver_release,
-	.read = &driver_read,
-	.llseek = &no_llseek,
+	.read = &seq_read,
+	.llseek = //&no_llseek,
+	seq_lseek, //maybe ?
 };
 
 static void	*driver_seq_start(struct seq_file *seq_file, loff_t *pos);
@@ -372,7 +375,7 @@ static inline int32_t	    scan_code_set_entry_to_index(struct scan_key_code *set
 	if (entry < set || entry > set + set_len) {
 		return -ESRCH; //no such entry
 	} else {
-		return (uint64_t)(entry - set) / sizeof(*set);
+		return ((uint64_t)entry - (uint64_t)set) / sizeof(*set);
 	}
 }
 
@@ -433,7 +436,10 @@ static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 				sizeof(scan_code_set_1) / sizeof(*scan_code_set_1),
 							key_id);
 
+		spin_lock(&key_list_spinlock);
 		list_add_tail(&entry->head, &key_entry_list);
+		printk(KERN_INFO LOG "In interrupt context: is_last: %d,  %px \n", (int)list_is_last(entry->head.prev, &key_entry_list), entry->head.prev);
+		spin_unlock(&key_list_spinlock);
 		hours = (now.tv_sec / 3600) % 24;
 		now.tv_sec %= 3600;
 		minutes = now.tv_sec / 60;
@@ -444,19 +450,19 @@ static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 
 		code_pending = false;
 		buffer_code = 0;
+		wake_up_interruptible(&read_wqueue);
 	}
-	/* wake_up_interruptible(&read_wqueue); */
 out:
 	return IRQ_NONE;
 }
 
-static int  driver_register_irq(struct cdev *cdev)
+static int  driver_register_irq(void *dev_id)
 {
 	if (irq == 0) {
 		irq = 12;
 	}
 
-	if (0 < request_irq(irq, &keyboard_irq_handler, IRQF_SHARED, MODULE_NAME, cdev)) {
+	if (0 < request_irq(irq, &keyboard_irq_handler, IRQF_SHARED, MODULE_NAME, dev_id)) {
 		printk(KERN_INFO LOG "Failed to request IRQ: %x\n", irq);
 		return -EBUSY;
 	}
@@ -466,38 +472,75 @@ static int  driver_register_irq(struct cdev *cdev)
 
 static int  driver_open(struct inode *inode, struct file *file)
 {
-	struct cdev	    *cdev;//WOW UNDEFINED BEHAVIOR HERE
-//	struct timer_data   *data;
-	int		    ret;
+	struct list_head *list = &key_entry_list;
+	int		  ret;
 
 	mutex_lock(&open_mutex);
-	cdev = inode->i_cdev;//WOW UNDEFINED BEHAVIOR HERE
-	file->private_data = cdev;//WOW UNDEFINED BEHAVIOR HERE
-	nonseekable_open(inode, file);
+	/* nonseekable_open(inode, file); */
 	printk(KERN_INFO LOG "%s has opened the device\n", current->comm);
-	ret = driver_register_irq(cdev); //WOW UNDEFINED BEHAVIOR HERE
+
+	file->private_data = NULL; //needed so that seq_open won't WARN_ON
+	ret = seq_open(file, &seq_ops);
 	if (ret) {
-		printk(KERN_WARNING LOG "Failed to register irq: %d\n", irq);
+		printk(KERN_WARNING LOG "seq_open() failed\n");
 		return ret;
 	}
-	printk(KERN_INFO LOG "driver_register_irq() returned %d\n", ret);
+	while (list_is_last(list, &key_entry_list)) {
+		printk(KERN_INFO LOG "In driver_open while(), list_is_last: %d, %px\n",(int)list_is_last(list, &key_entry_list), list);
+		ret = wait_event_interruptible(read_wqueue, !list_is_last(list, &key_entry_list));
+		printk(KERN_INFO LOG "woke up in open()\n");
+		if (ret)
+			return -ERESTARTSYS;
 
+	}
 
-	return seq_open(file, &seq_ops);
+	((struct seq_file *)file->private_data)->private = &key_entry_list;
+	printk(KERN_INFO LOG "IN driver_open -> this is next: %px, this is head: %px\n", key_entry_list.next, &key_entry_list);
+	return ret;
 }
 
 static void *driver_seq_start(struct seq_file *seq_file, loff_t *pos)
 {
-	return seq_list_start(&key_entry_list, *pos);
+	struct list_head *list = seq_file->private;
+	int		 ret;
+
+	list = seq_list_start(&key_entry_list, *pos);
+
+	printk(KERN_INFO LOG "*pos = %lld\n", *pos);
+	if (list == NULL) {
+		list =  key_entry_list.prev;
+	}
+
+	while (list_is_last(list, &key_entry_list)) {
+		printk(KERN_INFO LOG "In driver_open while(), list_is_last: %d, %px\n",(int)list_is_last(list, &key_entry_list), list);
+		ret = wait_event_interruptible(read_wqueue, !list_is_last(list, &key_entry_list));
+		printk(KERN_INFO LOG "woke up in start()\n");
+		if (ret)
+			return (void *)-ERESTARTSYS;
+	}
+
+
+	printk(KERN_INFO LOG "In driver_seq_start()\n");
+	//	unsigned long	flags;
+
+//	spin_lock_irqsave(&key_list_spinlock, flags);
+
+//	spin_lock_irqsave(&key_list_spinlock, flags);
+	printk(KERN_INFO LOG "In start() ret = %px\n", list);
+	return list;
 }
 
 static void driver_seq_stop(struct seq_file *seq_file, void *v)
 {
-	// dunno what to do here;
+
 }
 
 static void *driver_seq_next(struct seq_file *seq_file, void *v, loff_t *pos)
 {
+	printk(KERN_INFO LOG "next() -> %px, *pos: %lld\n", v, *pos);
+	if (list_is_last(v, &key_entry_list))
+		return NULL;
+	printk("next() list_is_last did not return\n");
 	return seq_list_next(v, &key_entry_list, pos);
 
 }
@@ -510,17 +553,20 @@ static int driver_seq_show(struct seq_file *seq_file, void *v)
 	long long	    hours;
 	long long	    minutes;
 	long long	    seconds;
+	unsigned long	    flags;
 
-
+	printk(KERN_INFO LOG "In driver_seq_show()");
 	if (list == NULL) {
 		return -ESRCH; //dunno about this;
 	}
+	spin_lock_irqsave(&key_list_spinlock, flags);
 	key_entry = list_entry(v, struct key_entry, head);
 	hours = (key_entry->date.tv_sec / 3600) % 24;
 	minutes = (key_entry->date.tv_sec / 60) % 60;
 	seconds = (key_entry->date.tv_sec) % 60;
 
 	key_code = &scan_code_set_1[key_entry->index]; //secure this
+	spin_unlock_irqrestore(&key_list_spinlock, flags);
 	seq_printf(seq_file, "%02lld:%02lld:%02lld %s(%#02llx) %s\n", hours, minutes, seconds,
 		key_code->key_name,
 		key_code->code,
@@ -531,41 +577,41 @@ static int driver_seq_show(struct seq_file *seq_file, void *v)
 static int  driver_release(struct inode *inode, struct file *file)
 {
 	printk(KERN_INFO LOG "Release of " MODULE_NAME " file by pid: %d\n", current->tgid);
-	free_irq(irq, inode->i_cdev);
 	mutex_unlock(&open_mutex);
 	return 0;
 }
 
 
-static ssize_t	driver_read(struct file *file, char __user *to, size_t size, loff_t *off)
-{
-	ssize_t	    ret;
-	uint64_t    len;
+/* static ssize_t	driver_read(struct file *file, char __user *to, size_t size, loff_t *off) */
+/* { */
+/* 	ssize_t	    ret; */
+/* 	uint64_t    len; */
 
-	while (atomic_read(&pending_data) == 0) {
-		if (0 != wait_event_interruptible(read_wqueue, atomic_read(&pending_data) == 1))
-			return -ERESTARTSYS;
-	}
-	atomic_set(&pending_data, 0);
-	if (*off >= sizeof(MODULE_NAME))
-		return (0);
-	len = min(size, sizeof(MODULE_NAME));
-	ret = (ssize_t)copy_to_user(to, MODULE_NAME, len);
-	if (ret != 0) {
-		ret = -EPERM;
-		goto out;
-	}
-	ret = (ssize_t)len;
-	*off += len;
-out:
-	return ret;
-}
+/* 	while (atomic_read(&pending_data) == 0) { */
+/* 		if (0 != wait_event_interruptible(read_wqueue, atomic_read(&pending_data) == 1)) */
+/* 			return -ERESTARTSYS; */
+/* 	} */
+/* 	atomic_set(&pending_data, 0); */
+/* 	if (*off >= sizeof(MODULE_NAME)) */
+/* 		return (0); */
+/* 	len = min(size, sizeof(MODULE_NAME)); */
+/* 	ret = (ssize_t)copy_to_user(to, MODULE_NAME, len); */
+/* 	if (ret != 0) { */
+/* 		ret = -EPERM; */
+/* 		goto out; */
+/* 	} */
+/* 	ret = (ssize_t)len; */
+/* 	*off += len; */
+/* out: */
+/* 	return ret; */
+/* } */
 
 static int __init   init(void)
 {
 	int		    ret;
 
 	ret = 0;
+
 	if (irq != 0) {
 		printk(KERN_INFO LOG "User requested default irq to be %d\n", irq);
 	} else {
@@ -577,6 +623,13 @@ static int __init   init(void)
 	} else {
 		minor = 42; //add defines
 	}
+	ret = driver_register_irq(&key_entry_list);
+	if (ret) {
+		printk(KERN_WARNING LOG "Failed to register irq: %d\n", irq);
+		return ret;
+	}
+	printk(KERN_INFO LOG "driver_register_irq() returned %d\n", ret);
+
 
 	driver_data.device.name = MODULE_NAME;
 	driver_data.device.fops = &device_fops;
@@ -599,6 +652,7 @@ module_init(init);
 static void __exit  cleanup(void)
 {
 	printk(KERN_INFO LOG "Cleanup up module\n");
+	free_irq(irq, &key_entry_list);
 	misc_deregister(&driver_data.device);
 }
 module_exit(cleanup);
