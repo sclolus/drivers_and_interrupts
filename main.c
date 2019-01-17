@@ -13,6 +13,7 @@
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
 #include <linux/miscdevice.h>
+#include <linux/seq_file.h>
 
 MODULE_AUTHOR("sclolus");
 MODULE_ALIAS("keyboard_driver");
@@ -47,7 +48,9 @@ MODULE_DEVICE_TABLE(usb, usb_module_id_table);
 static atomic_t	pending_data = ATOMIC_INIT(0);
 DECLARE_WAIT_QUEUE_HEAD(read_wqueue);
 
-enum	key_state {
+static LIST_HEAD(key_entry_list);
+
+enum	ps2_key_state {
 	PRESSED,
 	RELEASED
 };
@@ -55,12 +58,17 @@ enum	key_state {
 struct scan_key_code {
 	uint64_t	code;
 	char	        *key_name;
-	enum key_state	state;
+	enum ps2_key_state	state;
 };
 
 struct	key_entry {
-	struct scan_key_code	key;
+	// index inside the scan code set
+	uint32_t		index;
+
+	// Data at which the entry was performed
 	struct timeval		date;
+
+	struct list_head	head;
 };
 
 struct	driver_data {
@@ -69,6 +77,30 @@ struct	driver_data {
 };
 
 static struct driver_data  driver_data;
+
+static int	driver_release(struct inode *inode, struct file *file);
+static ssize_t	driver_read(struct file *file, char __user *to, size_t size, loff_t *off);
+static int	driver_open(struct inode *inode, struct file *file);
+static const struct file_operations	device_fops = {
+	.owner = THIS_MODULE,
+	.open = &driver_open,
+	.release = &driver_release,
+	.read = &driver_read,
+	.llseek = &no_llseek,
+};
+
+static void	*driver_seq_start(struct seq_file *seq_file, loff_t *pos);
+static int	driver_seq_show(struct seq_file *seq_file, void *v);
+static void	driver_seq_stop(struct seq_file *seq_file, void *v);
+static void	*driver_seq_next(struct seq_file *seq_file, void *v, loff_t *pos);
+
+static const struct seq_operations  seq_ops = {
+	.start = driver_seq_start,
+	.next  = driver_seq_next,
+	.stop  = driver_seq_stop,
+	.show  = driver_seq_show,
+};
+
 
 struct scan_key_code	scan_code_set_1[] = {
 	{ 0x1, "escape", PRESSED },
@@ -322,7 +354,7 @@ struct scan_key_code	scan_code_set_1[] = {
 	{ 0xe11d45e19dc5, "pause", PRESSED },
 };
 
-static PURE char	*key_state_to_string(enum key_state state) {
+static PURE char	*ps2_key_state_to_string(enum ps2_key_state state) {
 	switch (state) {
 	case PRESSED:
 		return "Pressed";
@@ -333,6 +365,15 @@ static PURE char	*key_state_to_string(enum key_state state) {
 		return NULL;
 	}
 	return NULL;
+}
+
+static inline int32_t	    scan_code_set_entry_to_index(struct scan_key_code *set, uint64_t set_len, struct scan_key_code *entry)
+{
+	if (entry < set || entry > set + set_len) {
+		return -ESRCH; //no such entry
+	} else {
+		return (uint64_t)(entry - set) / sizeof(*set);
+	}
 }
 
 static struct scan_key_code *find_scan_key_code(struct scan_key_code *set, uint64_t set_len, uint64_t code)
@@ -374,23 +415,38 @@ static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
 		buffer_code |= code;
 		printk(KERN_INFO LOG "Current buffered code: %#02llx\n", (uint64_t)buffer_code);
 	} else {
-		struct timeval	now;
-		long long	hours;
-		long long	minutes;
-		long long	seconds;
+		struct timeval	    now;
+		long long	    hours;
+		long long	    minutes;
+		long long	    seconds;
+		struct key_entry    *entry;
 
+		if (NULL == (entry = kmalloc(sizeof(struct key_entry), GFP_ATOMIC))) {
+			// Not much to do if kmalloc fails. just pop up a warning
+			printk(KERN_WARNING LOG "Failed to allocated for key_entry, entry log will be lost\n");
+			goto out;
+		}
 		do_gettimeofday(&now);
+
+		entry->date = now;
+		entry->index = scan_code_set_entry_to_index(scan_code_set_1,
+				sizeof(scan_code_set_1) / sizeof(*scan_code_set_1),
+							key_id);
+
+		list_add_tail(&entry->head, &key_entry_list);
 		hours = (now.tv_sec / 3600) % 24;
 		now.tv_sec %= 3600;
 		minutes = now.tv_sec / 60;
 		now.tv_sec %= 60;
 		seconds = now.tv_sec;
 
-		printk(KERN_INFO LOG "%02lld:%02lld:%02lld %s(%#02llx) %s\n", hours, minutes, seconds, key_id->key_name, (uint64_t)code, key_state_to_string(key_id->state));
+		printk(KERN_INFO LOG "%02lld:%02lld:%02lld %s(%#02llx) %s\n", hours, minutes, seconds, key_id->key_name, (uint64_t)code, ps2_key_state_to_string(key_id->state));
+
 		code_pending = false;
 		buffer_code = 0;
 	}
 	/* wake_up_interruptible(&read_wqueue); */
+out:
 	return IRQ_NONE;
 }
 
@@ -410,18 +466,66 @@ static int  driver_register_irq(struct cdev *cdev)
 
 static int  driver_open(struct inode *inode, struct file *file)
 {
-	struct cdev	    *cdev;
+	struct cdev	    *cdev;//WOW UNDEFINED BEHAVIOR HERE
 //	struct timer_data   *data;
 	int		    ret;
 
 	mutex_lock(&open_mutex);
-	cdev = inode->i_cdev;
-	file->private_data = cdev;
+	cdev = inode->i_cdev;//WOW UNDEFINED BEHAVIOR HERE
+	file->private_data = cdev;//WOW UNDEFINED BEHAVIOR HERE
 	nonseekable_open(inode, file);
 	printk(KERN_INFO LOG "%s has opened the device\n", current->comm);
-	ret = driver_register_irq(cdev);
+	ret = driver_register_irq(cdev); //WOW UNDEFINED BEHAVIOR HERE
+	if (ret) {
+		printk(KERN_WARNING LOG "Failed to register irq: %d\n", irq);
+		return ret;
+	}
 	printk(KERN_INFO LOG "driver_register_irq() returned %d\n", ret);
-	return ret;
+
+
+	return seq_open(file, &seq_ops);
+}
+
+static void *driver_seq_start(struct seq_file *seq_file, loff_t *pos)
+{
+	return seq_list_start(&key_entry_list, *pos);
+}
+
+static void driver_seq_stop(struct seq_file *seq_file, void *v)
+{
+	// dunno what to do here;
+}
+
+static void *driver_seq_next(struct seq_file *seq_file, void *v, loff_t *pos)
+{
+	return seq_list_next(v, &key_entry_list, pos);
+
+}
+
+static int driver_seq_show(struct seq_file *seq_file, void *v)
+{
+	struct list_head	*list = v;
+	struct key_entry        *key_entry;
+	struct scan_key_code	*key_code;
+	long long	    hours;
+	long long	    minutes;
+	long long	    seconds;
+
+
+	if (list == NULL) {
+		return -ESRCH; //dunno about this;
+	}
+	key_entry = list_entry(v, struct key_entry, head);
+	hours = (key_entry->date.tv_sec / 3600) % 24;
+	minutes = (key_entry->date.tv_sec / 60) % 60;
+	seconds = (key_entry->date.tv_sec) % 60;
+
+	key_code = &scan_code_set_1[key_entry->index]; //secure this
+	seq_printf(seq_file, "%02lld:%02lld:%02lld %s(%#02llx) %s\n", hours, minutes, seconds,
+		key_code->key_name,
+		key_code->code,
+		ps2_key_state_to_string(key_code->state));
+	return 0;
 }
 
 static int  driver_release(struct inode *inode, struct file *file)
@@ -456,14 +560,6 @@ static ssize_t	driver_read(struct file *file, char __user *to, size_t size, loff
 out:
 	return ret;
 }
-
-static struct file_operations	device_fops = {
-	.owner = THIS_MODULE,
-	.open = &driver_open,
-	.release = &driver_release,
-	.read = &driver_read,
-	.llseek = &no_llseek,
-};
 
 static int __init   init(void)
 {
