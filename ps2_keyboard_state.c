@@ -44,6 +44,7 @@ inline void	ps2_reset_flags(struct ps2_keyboard_state *state)
 
 inline bool	ps2_maybe_in_scan_set(struct ps2_keyboard_state *state, uint8_t code)
 {
+	printk(KERN_INFO LOG "index: %d\n", state->current_code_index);
 	return maybe_in_scan_set(state->scan_code_set, state->set_len, code, state->current_code_index);
 }
 
@@ -172,8 +173,10 @@ inline bool	ps2_catch_modifiers(struct ps2_keyboard_state *state, struct scan_ke
 
 	i = 0;
 	while (i < sizeof(callbacks) / sizeof(*callbacks)) {
-		if (!strcmp(key->key_name, modifier_names[i]))
+		if (!strcmp(key->key_name, modifier_names[i])) {
+			printk(KERN_INFO LOG "catch a keyboard modifier: %s\n", modifier_names[i]);
 			return callbacks[i](state, key);
+		}
 		i++;
 	}
 	return false;
@@ -188,11 +191,7 @@ struct scan_key_code *ps2_find_scan_key_code(struct ps2_keyboard_state *state)
 	key = find_scan_key_code(state->scan_code_set, state->set_len, state->pending_code);
 
 	if (key) {
-		bool modifier_catched = ps2_catch_modifiers(state, key);
-
-		if (modifier_catched) {
-			printk(KERN_INFO LOG "catch a keyboard modifier\n"); // remove this
-		}
+		ps2_catch_modifiers(state, key);
 	}
 	return key;
 }
@@ -211,20 +210,22 @@ static bool	    is_alpha(int c)
 
 static int	    toupper(int c)
 {
-	if (c >= 'A' && c <= 'Z')
-		return c + ('a' - 'A');
+	if (c >= 'a' && c <= 'z')
+		return c - ('a' - 'A');
 	return c;
 }
 
 char		    ps2_key_name_with_modifiers(struct ps2_keyboard_state *state, struct scan_key_code *key_id)
 {
-	const char  *has_shifted_value = "1234567890-=][\';/.,`";
+	const char  *has_shifted_value = "1234567890-=[]\\';/.,`";
 	const char  *shifted_values =    "!@#$%^&*()_+{}|\":?><~";
 	char	    c = 0x0; //default no-value value
 
 
 	if (key_code_has_ascii_value(key_id)) {
 		c = key_id->ascii_value;
+	} else {
+		return c;
 	}
 	if (ps2_is_shifted(state)) {
 		if (is_alpha(c)) {

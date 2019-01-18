@@ -589,8 +589,8 @@ struct scan_key_code scan_code_set_2[] = {
 };
 
 static struct ps2_keyboard_state	keyboard_state = {
-	.scan_code_set = scan_code_set_1,
-	.set_len = sizeof(scan_code_set_1) / sizeof(*scan_code_set_1),
+	.scan_code_set = scan_code_set_2,
+	.set_len = sizeof(scan_code_set_2) / sizeof(*scan_code_set_2),
 };
 
 static irqreturn_t	keyboard_irq_handler(int irq, void *dev_id)
@@ -692,17 +692,16 @@ static int  driver_open(struct inode *inode, struct file *file)
 		printk(KERN_WARNING LOG "seq_open() failed\n");
 		return ret;
 	}
+
 	while (list_is_last(list, &key_entry_list)) {
-		printk(KERN_INFO LOG "In driver_open while(), list_is_last: %d, %px\n",(int)list_is_last(list, &key_entry_list), list);
+
 		ret = wait_event_interruptible(read_wqueue, !list_is_last(list, &key_entry_list));
-		printk(KERN_INFO LOG "woke up in open()\n");
 		if (ret)
 			return -ERESTARTSYS;
 
 	}
 
 	((struct seq_file *)file->private_data)->private = &key_entry_list;
-	printk(KERN_INFO LOG "IN driver_open -> this is next: %px, this is head: %px\n", key_entry_list.next, &key_entry_list);
 	return ret;
 }
 
@@ -713,27 +712,22 @@ static void *driver_seq_start(struct seq_file *seq_file, loff_t *pos)
 
 	list = seq_list_start(&key_entry_list, *pos);
 
-	printk(KERN_INFO LOG "*pos = %lld\n", *pos);
 	if (list == NULL) {
 		list =  key_entry_list.prev;
 	}
 
 	while (list_is_last(list, &key_entry_list)) {
-		printk(KERN_INFO LOG "In driver_open while(), list_is_last: %d, %px\n",(int)list_is_last(list, &key_entry_list), list);
 		ret = wait_event_interruptible(read_wqueue, !list_is_last(list, &key_entry_list));
-		printk(KERN_INFO LOG "woke up in start()\n");
 		if (ret)
 			return (void *)-ERESTARTSYS;
 	}
 
 
-	printk(KERN_INFO LOG "In driver_seq_start()\n");
 	//	unsigned long	flags;
 
 //	spin_lock_irqsave(&key_list_spinlock, flags);
 
 //	spin_lock_irqsave(&key_list_spinlock, flags);
-	printk(KERN_INFO LOG "In start() ret = %px\n", list);
 	return list;
 }
 
@@ -744,10 +738,8 @@ static void driver_seq_stop(struct seq_file *seq_file, void *v)
 
 static void *driver_seq_next(struct seq_file *seq_file, void *v, loff_t *pos)
 {
-	printk(KERN_INFO LOG "next() -> %px, *pos: %lld\n", v, *pos);
 	if (list_is_last(v, &key_entry_list))
 		return NULL;
-	printk("next() list_is_last did not return\n");
 	return seq_list_next(v, &key_entry_list, pos);
 
 }
