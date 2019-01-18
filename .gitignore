@@ -2,3 +2,8 @@
 **/*.ko
 **/*~
 **/#*#
+*.cmd
+*.mod.c
+.tmp_versions
+*.order
+*.symvers
