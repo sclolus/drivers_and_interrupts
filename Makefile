@@ -1,16 +1,19 @@
-module_name = test_driver
+module_name = keyboard_driver
 
 src-test = test.c
 obj-test = $(src-test:.c=.o)
 
-src-m += main.c
-obj-m += main.o
-driver-m += $(src-m:.c=.o)
-module-obj = $(obj-m:.o=.ko)
+src-m += scan_code_sets.c \
+	 ps2_keyboard_state.c \
+	main.c
+
+obj-m += $(module_name).o
+$(module_name)-objs += $(src-m:.c=.o)
+#module-obj = $(obj-m:.o=.ko)
 
 KERNELRELEASE=$(shell uname -r)
 KDIR=/lib/modules/$(shell uname -r)/build
-EXTRAFLAGS= -Wall  -Werror -v -g -DDEBUG -O -I$(PWD)
+EXTRAFLAGS= -Wall  -Werror -g -DDEBUG -O -I$(PWD)
 FLAGS= $(EXTRAFLAGS)
 ccflags-y= $(EXTRAFLAGS)
 
@@ -19,7 +22,7 @@ all:
 
 modules_install: all
 	make -C $(KDIR) M=$(PWD) modules_install
-	cp $(module-obj) /lib/modules/$(shell uname -r)/extra
+#	cp $(module-obj) /lib/modules/$(shell uname -r)/extra
 	sudo depmod -a
 
 clean:
