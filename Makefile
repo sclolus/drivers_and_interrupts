@@ -10,7 +10,7 @@ module-obj = $(obj-m:.o=.ko)
 
 KERNELRELEASE=$(shell uname -r)
 KDIR=/lib/modules/$(shell uname -r)/build
-EXTRAFLAGS= -Wall  -Werror -v -g -DDEBUG -O
+EXTRAFLAGS= -Wall  -Werror -v -g -DDEBUG -O -I$(PWD)
 FLAGS= $(EXTRAFLAGS)
 ccflags-y= $(EXTRAFLAGS)
 
